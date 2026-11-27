@@ -9,6 +9,13 @@ import matplotlib.pyplot as plt
 # - Tentative Job Offer (TJO): A preliminary job offer extended to a selected candidate.
 # - Entry on Duty (EOD): The date a selected candidate officially begins employment.
 
+# Assumptions
+# - Assumes a one-to-one ratios of recruitments to certificates (one recruitment = exactly one certificate)
+
+# THINGS TO CHANGE
+# - New vacancies are created with a Poisson distribution, we should get actual historical data
+# - The first two iterations of the MC simulation do not really continue from the current state (i.e. 
+# it does not account for hires already in the pipline)
 
 def main():
     
@@ -19,34 +26,37 @@ def main():
     pay_period_length = 14
 
     # Process the historical data and retrieve simulation parameters
-    historical = process_historical_data(
-        historical_data_file,
-        pay_period_length
-    )
+    historical = process_historical_data(historical_data_file, pay_period_length)
 
-    # Average recruitment actions initiated per pay period
+    # Average recruitments per pay period
     average_recruitments_per_pp = historical["average_recruitments_per_pp"]
 
-    # Historical recruitment counts per pay period
+    # Historical recruitment counts
     recruitments_per_pp = historical["recruitments_per_pp"]
 
     # Probability a recruitment action results in at least one selection
     selection_rate = historical["selection_rate"]
 
-    # Probability an individual selection results in a completed hire
-    stick_rate = historical["stick_rate"]
-
-    # Average number of certificates issued per recruitment action
+    # Average number of certificates per recruitment
     certificates_per_recruitment = historical["certificates_per_recruitment"]
 
     # Average number of selections per certificate
     selections_per_certificate = historical["selections_per_certificate"]
     
+    # Array of selections per recruitmnet
+    selections_per_recruitment = historical["selections_per_recruitment"]
+    
+    # Probability a selection results in a hire
+    stick_rate = historical["stick_rate"]
+    
+    # Historical hiring timeline  by pay periods
+    historical_timelines_pp = historical["historical_timelines_pp"]
+    
     
 
     ##### Simulation Parameters and Initial Conditions #####
 
-    # Number of authorized positions within the Coast Guard
+    # Number of authorized positions in the Coast Guard
     total_positions = 10000 ##### ASK FOR THIS NUMBER #######
 
     # Percentage of authorized positions that are vacant initially
@@ -59,7 +69,7 @@ def main():
     # Probability that a completed hire is internal
     internal_hire_probability = 0.42 ##### ASK FOR THIS NUMBER #######
 
-    # Number of pay periods between vacancy creation and recruitment initiation
+    # Number of pay periods between a new vacancy and recruitment process started
     vacancy_to_recruitment_delay = 1 ##### ASK FOR THIS NUMBER #######
 
     # New vacancy generation
@@ -68,8 +78,8 @@ def main():
     # Number of pay periods to simulate (two years)
     simulation_periods = 52
 
-    # Number of independent Monte Carlo simulations
-    number_of_simulations = 1000
+    # Number of Monte Carlo simulations
+    number_of_simulations = 100
 
     # Vacancy rates from each simulation
     vacancy_rate_results = np.zeros((number_of_simulations, simulation_periods + 1))
@@ -79,6 +89,8 @@ def main():
     ##### Monte Carlo Simulation #####
 
     for simulation in range(number_of_simulations):
+        
+        print(simulation)
         
         # Initialize number of vacancies
         current_vacancies = starting_vacancies
@@ -94,23 +106,125 @@ def main():
 
             # Generate new vacancies from employee departures
             new_vacancies = np.random.poisson(average_new_vacancies_per_pp)
+            vacancy_queue.append(new_vacancies)
 
-            # 2. Move eligible vacancies into recruitment
+            # New vacancies that are ready to enter recruitment pipeline
+            if period + 1 > vacancy_to_recruitment_delay:
+                 eligible_vacancies = sum(vacancy_queue[:period + 1 - vacancy_to_recruitment_delay])
+            else:
+                eligible_vacancies = 0
+                
+            # Sample the number of recruitments from historical data
+            recruitments_created = np.random.choice(recruitments_per_pp)
+            
+            # Cannot initiate more recruitments than eligible vacancies
+            recruitments_created = min(recruitments_created, eligible_vacancies)
+            
+            # Remove recruited vacancies from the vacancy queue, starting with the oldest
+            remaining_recruitments = recruitments_created
+            
+            # Iterate over vacancy queue
+            for i in range(period + 1 - vacancy_to_recruitment_delay):
+                
+                # Initiate recruitments for eligble vacancies
+                vacancies_recruited = min(vacancy_queue[i], remaining_recruitments)
+                
+                # Subtract initiated recruitments from queue 
+                vacancy_queue[i] -= vacancies_recruited
+                remaining_recruitments -= vacancies_recruited
 
-            # 3. Progress existing recruitment actions
+                if remaining_recruitments == 0:
+                    break
 
-            # 4. Simulate certificates and candidate selections
+            # Create new recruitment actions
+            for i in range(recruitments_created):
+                
+                # Randomly select a historical recruitment timeline
+                eta1= np.random.randint(len(historical_timelines_pp))
+                stage_durations = historical_timelines_pp[eta1]
+                
+                # Create recruitment dictionary
+                recruitment = {
+                    
+                    "period_initiated": period,
+                    
+                    # Sampled stage durations
+                    "rpa_to_cert_duration": stage_durations[0],
+                    "cert_to_tjo_duration": stage_durations[1],
+                    "tjo_to_eod_duration": stage_durations[2],
+                    
+                    # Scheduled completion periods
+                    "period_certificate": period + stage_durations[0],
+                    "period_tjo": None,
+                    "period_eod": None,
+                    
+                    # Hiring outcomes
+                    "number_of_selections": 0,
+                    "number_of_hires": 0,
+                    "internal_hires": 0,
+                    "external_hires": 0
+                }
+                
+                # Add to recruitment pipeline
+                recruitment_pipeline.append(recruitment)
+                
+            for recruitment in recruitment_pipeline:
+                
+                # Generate selections for eligible recruitments                
+                if (recruitment["period_certificate"] <= period and recruitment["period_tjo"] is None):
+                    
+                    # Sample the number of selections from historical data
+                    recruitment["number_of_selections"] = np.random.choice(selections_per_recruitment)
+                    
+                    # Update TJO period
+                    recruitment["period_tjo"] = recruitment["period_certificate"] + recruitment["cert_to_tjo_duration"]
+                    
+                # Generate TJOs for eligible selections
+                if (recruitment["period_tjo"] is not None and recruitment["period_tjo"] <= period and recruitment["period_eod"] is None):
 
-            # 5. Simulate accepted TJOs and completed hires
+                    # Determine number of selections that become hires
+                    recruitment["number_of_hires"] = np.random.binomial(recruitment["number_of_selections"],stick_rate)
 
-            # 6. Determine internal versus external hires
+                    # If there are no hires, close the recruitment 
+                    if recruitment["number_of_hires"] == 0:
+                        recruitment["period_eod"] = period
+                        
+                    else:
+                        # Update EOD period
+                        recruitment["period_eod"] = (recruitment["period_tjo"] + recruitment["tjo_to_eod_duration"])
+                        
+                # Complete hires that reach EOD
+                if (recruitment["period_eod"] is not None and recruitment["period_eod"] <= period):
+                    
+                    # Cannot hire more people than there are vacancies
+                    recruitment["number_of_hires"] = min(recruitment["number_of_hires"], current_vacancies)
+                    
+                    # Determine number of internal hires
+                    recruitment["internal_hires"] = np.random.binomial(recruitment["number_of_hires"], internal_hire_probability)
 
-            # 7. Create replacement vacancies from internal hires
+                    # Calculate number of external hires
+                    recruitment["external_hires"] = (recruitment["number_of_hires"] - recruitment["internal_hires"])
 
-            # 8. Update total vacancies
+                    # Update number of vacancies for external hires
+                    current_vacancies -= recruitment["external_hires"]
 
-            # 9. Calculate vacancy rate
+                    # Add new vacancies to queue for interal hires
+                    vacancy_queue[period] += recruitment["internal_hires"]
 
+
+            remaining_pipeline = []
+
+            for recruitment in recruitment_pipeline:
+
+                # Keep recruitment actions that have not reached EOD
+                if (recruitment["period_eod"] is None
+                        or recruitment["period_eod"] > period):
+
+                    remaining_pipeline.append(recruitment)
+
+            recruitment_pipeline = remaining_pipeline
+
+            # Calculate vacancy rate
             vacancy_rate_results[simulation, period + 1] = (
                 current_vacancies / total_positions
             )
@@ -168,7 +282,7 @@ def process_historical_data(csv_file, pay_period_length):
     for column in date_columns:
         data[column] = pd.to_datetime(data[column], errors="coerce")
         
-        # Total recruitments from historical data
+    # Total recruitments from historical data
     total_recruitments = len(data)
 
     # Determine the date range of the dataset
@@ -243,15 +357,12 @@ def process_historical_data(csv_file, pay_period_length):
     # Total number of candidates who reached their EOD date. This represents the total number of completed hires
     total_hires = data["Hired_EODs"].sum()
 
-    # Recruitment-action selection rate:
     # Percentage of recruitment actions that resulted in at least one candidate being selected
     selection_rate = actions_with_selections / total_recruitments
 
-    # Selection-to-hire stick rate:
     # Percentage of individual selections that ultimately resulted in a completed hire
     stick_rate = total_hires / total_selections
 
-    # Overall hiring rate:
     # AVerage number of completed hires per recruitment action
     overall_hiring_rate = total_hires / total_recruitments
 
@@ -260,6 +371,9 @@ def process_historical_data(csv_file, pay_period_length):
 
     # Average number of individual selections per certificate
     selections_per_certificate = total_selections / total_certificates
+    
+    # Number of selections per recruitment action
+    selections_per_recruitment = data["Selections_TJOs"].values.tolist()
 
     # Display the percentage of activity progressing through the different stages of the hiring process.
     print("\nCONVERSION RATES")
@@ -275,50 +389,35 @@ def process_historical_data(csv_file, pay_period_length):
     data["RPA_to_Cert"] = (data["Cert_Issued_Date"] - data["RPA_Initiated_Date"]).dt.days
     data["Cert_to_TJO"] = (data["TJO_Accepted_Date"] - data["Cert_Issued_Date"]).dt.days
     data["TJO_to_EOD"] = (data["EOD_Date"] - data["TJO_Accepted_Date"]).dt.days
-    data["RPA_to_EOD"] = (data["EOD_Date"] - data["RPA_Initiated_Date"]).dt.days
 
-    timeline_columns = [
-        "RPA_to_Cert",
-        "Cert_to_TJO",
-        "TJO_to_EOD",
-        "RPA_to_EOD"
-    ]
-
-    # Convert observed durations into approximate pay periods
-    for column in timeline_columns:
-
-        pp_column = column + "_PP"
-
-        data[pp_column] = np.ceil(data[column] / pay_period_length)
-
-    print("\nAVERAGE HIRING TIMELINES (PAY PERIODS)")
-    print("-----------------------------------")
-
-    for column in timeline_columns:
-
-        pp_column = column + "_PP"
-
-        print(
-            f"{column}: "
-            f"{data[pp_column].mean():.2f} pay periods"
-        )
-
-
-    # Plot Hiring Timelines
-    plt.figure(figsize=(10, 5))
-
-    plt.hist(
-        data["RPA_to_EOD"].dropna(),
-        bins=25,
-        edgecolor="black"
+    # Remove missing observations    
+    complete_timelines = data.dropna(
+        subset=[
+            "RPA_to_Cert",
+            "Cert_to_TJO",
+            "TJO_to_EOD"
+        ]
     )
+        
+    historical_timelines_pp = []
+    
+    for i in range(len(complete_timelines)):
 
-    plt.xlabel("Total Hiring Time (Days)")
-    plt.ylabel("Number of Recruitments")
-    plt.title("Distribution of Total Hiring Time")
+        # Extract timeline value
+        rpa_to_cert = complete_timelines["RPA_to_Cert"].values[i]
+        cert_to_tjo = complete_timelines["Cert_to_TJO"].values[i]
+        tjo_to_eod = complete_timelines["TJO_to_EOD"].values[i]
 
-    plt.grid(axis="y")
-    plt.show()
+        # Convert observed durations into pay periods
+        rpa_to_cert = int(np.ceil(rpa_to_cert / pay_period_length))
+        cert_to_tjo = int(np.ceil(cert_to_tjo / pay_period_length))
+        tjo_to_eod = int(np.ceil(tjo_to_eod / pay_period_length))
+
+        historical_timelines_pp.append([
+            rpa_to_cert,
+            cert_to_tjo,
+            tjo_to_eod
+        ])
 
     historical_results = {
 
@@ -335,6 +434,10 @@ def process_historical_data(csv_file, pay_period_length):
         "stick_rate": stick_rate,
         "certificates_per_recruitment": certificates_per_recruitment,
         "selections_per_certificate": selections_per_certificate,
+        "selections_per_recruitment": selections_per_recruitment,
+        
+        # Hiring Funnel Timelines
+        "historical_timelines_pp": historical_timelines_pp
     }
 
     return historical_results
